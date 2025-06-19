@@ -41,10 +41,20 @@ async def process_excel(uploaded_file):
             df.at[i, "Data Situação"] = data.get("statusDate", "")
             df.at[i, "Natureza Jurídica"] = company.get("nature", {}).get("text", "")
             df.at[i, "Porte"] = company.get("size", {}).get("text", "")
-            df.at[i, "Telefone"] = data.get("phones", [{}])[0].get("number", "")
-            df.at[i, "Email"] = data.get("emails", [{}])[0].get("address", "")
+
+            # Telefones
+            phones = data.get("phones", [])
+            if phones and isinstance(phones, list):
+                df.at[i, "Telefone"] = phones[0].get("number", "")
+
+            # Emails
+            emails = data.get("emails", [])
+            if emails and isinstance(emails, list):
+                df.at[i, "Email"] = emails[0].get("address", "")
+
+            # Atividades
             df.at[i, "Atividade Principal"] = data.get("mainActivity", {}).get("text", "")
-            df.at[i, "CNAEs Secundários"] = "; ".join([act["text"] for act in data.get("sideActivities", [])])
+            df.at[i, "CNAEs Secundários"] = "; ".join([act.get("text", "") for act in data.get("sideActivities", [])])
 
             # Endereço
             df.at[i, "Endereço"] = address.get("street", "")
@@ -53,26 +63,26 @@ async def process_excel(uploaded_file):
             df.at[i, "Município"] = address.get("city", "")
             df.at[i, "UF"] = address.get("state", "")
             df.at[i, "CEP"] = address.get("zip", "")
-            df.at[i, "Geolocalização"] = f"{address.get('latitude','')}, {address.get('longitude','')}"
+            df.at[i, "Geolocalização"] = f"{address.get('latitude', '')}, {address.get('longitude', '')}"
 
             # Simples Nacional / MEI
-            df.at[i, "Simples Optante"] = simples.get("optant", "")
+            df.at[i, "Simples Optante"] = "Sim" if simples.get("optant") else "Não"
             df.at[i, "Simples Desde"] = simples.get("since", "")
-            df.at[i, "MEI Optante"] = simei.get("optant", "")
+            df.at[i, "MEI Optante"] = "Sim" if simei.get("optant") else "Não"
             df.at[i, "MEI Desde"] = simei.get("since", "")
 
             # Inscrições estaduais por UF
             for reg in data.get("registrations", []):
-                if reg["state"] == "SP":
-                    df.at[i, "IE_SP"] = reg["number"]
-                elif reg["state"] == "MS":
-                    df.at[i, "IE_MS"] = reg["number"]
-                elif reg["state"] == "AM":
-                    df.at[i, "IE_AM"] = reg["number"]
+                if reg.get("state") == "SP":
+                    df.at[i, "IE_SP"] = reg.get("number", "")
+                elif reg.get("state") == "MS":
+                    df.at[i, "IE_MS"] = reg.get("number", "")
+                elif reg.get("state") == "AM":
+                    df.at[i, "IE_AM"] = reg.get("number", "")
 
             # Sócios
             membros = company.get("members", [])
-            nomes_socios = [m["person"]["name"] for m in membros if "person" in m]
+            nomes_socios = [m.get("person", {}).get("name", "") for m in membros if "person" in m]
             df.at[i, "Sócios"] = "; ".join(nomes_socios)
 
         except Exception as e:
@@ -80,7 +90,12 @@ async def process_excel(uploaded_file):
 
         time.sleep(DELAY)
 
+    # Garante que a pasta 'files' existe
+    output_dir = Path("files")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     output_filename = f"{uuid.uuid4()}.xlsx"
-    output_path = Path("files") / output_filename
+    output_path = output_dir / output_filename
     df.to_excel(output_path, index=False)
+
     return output_path
