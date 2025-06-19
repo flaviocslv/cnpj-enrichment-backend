@@ -2,6 +2,7 @@ import pandas as pd
 import requests
 import time
 import uuid
+import json
 from pathlib import Path
 from app.utils import sanitize_cnpj
 from app.config import API_URL, DELAY
@@ -15,21 +16,21 @@ async def process_excel(uploaded_file):
         "CapitalSocial", "Telefone", "Email", "AtividadePrincipal",
         "CNAEs", "Endereco", "Municipio", "UF", "CEP", "Numero", "Complemento",
         "SimplesOptante", "SimplesSince", "MEIOptante", "MEISince",
-        "Latitude", "Longitude"
+        "Latitude", "Longitude", "InscricoesEstaduais"
     ]
     for col in base_cols:
         df[col] = ""
 
-    # Tratamento de colunas dinâmicas (IE, sócios, estabelecimentos)
+    # Tratamento de colunas dinâmicas (sócios, estabelecimentos)
     max_socios = 5  # ajustável conforme necessidade
     max_estabs = 5
-    for uf in ["AC","AL","AP","AM","BA","CE","DF","ES","GO","MA","MT","MS","MG","PA","PB","PR","PE","PI","RJ","RN","RS","RO","RR","SC","SP","SE","TO"]:
-        df[f"IE_{uf}"] = ""
+
     for i in range(1, max_socios+1):
         df[f"Socio_{i}_Nome"] = ""
         df[f"Socio_{i}_Tipo"] = ""
         df[f"Socio_{i}_TaxId"] = ""
         df[f"Socio_{i}_Role"] = ""
+
     for i in range(1, max_estabs+1):
         df[f"Estab_{i}_CNPJ"] = ""
         df[f"Estab_{i}_Tipo"] = ""
@@ -73,12 +74,13 @@ async def process_excel(uploaded_file):
         df.at[idx, "MEIOptante"] = "Sim" if simei.get("optant") else "Não"
         df.at[idx, "MEISince"] = simei.get("since", "")
 
-        # IE por UF
-        for reg in data.get("registrations", []):
-            uf = reg.get("state")
-            df.at[idx, f"IE_{uf}"] = reg.get("number", "")
-
-        # SUFRAMA - pode adicionar colunas semelhantes se necessário
+        # IE em formato JSON por UF
+        ies_dict = {
+            reg.get("state"): reg.get("number")
+            for reg in data.get("registrations", [])
+            if reg.get("state") and reg.get("number")
+        }
+        df.at[idx, "InscricoesEstaduais"] = json.dumps(ies_dict, ensure_ascii=False)
 
         # Sócios
         for i, m in enumerate(comp.get("members", [])[:max_socios]):
