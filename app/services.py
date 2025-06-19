@@ -10,118 +10,77 @@ async def process_excel(uploaded_file):
     df = pd.read_excel(uploaded_file.file)
     df["CNPJ_Sanitizado"] = df["CNPJ"].apply(sanitize_cnpj)
 
-    # Adiciona colunas separadas com base na API CNPJa
-    additional_columns = [
-        # Receita Federal
-        "razao_social", "nome_fantasia", "data_inicio_atividade", "email",
-        "logradouro", "numero", "complemento", "bairro", "municipio", "uf", "cep",
-        "telefone_1", "telefone_2", "fax",
-        "cnae_principal_codigo", "cnae_principal_descricao",
-        "natureza_juridica_codigo", "natureza_juridica_descricao",
-        "situacao", "data_situacao", "motivo_situacao",
-        "porte", 
-
-        # Simples Nacional
-        "simples_opcao", "simples_data_opcao", "simples_data_exclusao",
-        "mei_opcao", "mei_data_opcao", "mei_data_exclusao",
-
-        # Inscrição Estadual (consolidada)
-        "ie_ufs", "ie_numeros", "ie_situacoes",
-
-        # SUFRAMA
-        "suframa_numero", "suframa_situacao", "suframa_incentivo",
-
-        # Geocodificação
-        "latitude", "longitude",
-
-        # Sócios (lista concatenada)
-        "socios_nomes"
+    # Adiciona novas colunas no DataFrame
+    cols = [
+        "Razão Social", "Situação", "Data Situação", "Natureza Jurídica", "Porte",
+        "Telefone", "Email", "Atividade Principal", "CNAEs Secundários",
+        "Endereço", "Município", "UF", "CEP", "Número", "Complemento",
+        "Simples Optante", "Simples Desde", "MEI Optante", "MEI Desde",
+        "IE_SP", "IE_MS", "IE_AM", "Geolocalização", "Sócios"
     ]
-
-    for col in additional_columns:
+    for col in cols:
         df[col] = ""
 
     for i, row in df.iterrows():
         cnpj = row["CNPJ_Sanitizado"]
-        url = f"{API_URL}/{cnpj}?simples=true&registrations=BR&geocoding=true"
         try:
-            response = requests.get(url)
+            response = requests.get(f"{API_URL}/{cnpj}")
             if response.status_code != 200:
+                print(f"Erro ao consultar CNPJ {cnpj}: {response.status_code}")
                 continue
+
             data = response.json()
 
-            # Receita Federal
-            df.at[i, "razao_social"] = data.get("razaoSocial", "")
-            df.at[i, "nome_fantasia"] = data.get("nomeFantasia", "")
-            df.at[i, "data_inicio_atividade"] = data.get("dataInicioAtividade", "")
-            df.at[i, "email"] = data.get("email", "")
+            company = data.get("company", {})
+            address = data.get("address", {})
+            simples = company.get("simples", {})
+            simei = company.get("simei", {})
 
-            endereco = data.get("endereco", {})
-            df.at[i, "logradouro"] = endereco.get("logradouro", "")
-            df.at[i, "numero"] = endereco.get("numero", "")
-            df.at[i, "complemento"] = endereco.get("complemento", "")
-            df.at[i, "bairro"] = endereco.get("bairro", "")
-            df.at[i, "municipio"] = endereco.get("municipio", "")
-            df.at[i, "uf"] = endereco.get("uf", "")
-            df.at[i, "cep"] = endereco.get("cep", "")
+            df.at[i, "Razão Social"] = company.get("name", "")
+            df.at[i, "Situação"] = data.get("status", {}).get("text", "")
+            df.at[i, "Data Situação"] = data.get("statusDate", "")
+            df.at[i, "Natureza Jurídica"] = company.get("nature", {}).get("text", "")
+            df.at[i, "Porte"] = company.get("size", {}).get("text", "")
+            df.at[i, "Telefone"] = data.get("phones", [{}])[0].get("number", "")
+            df.at[i, "Email"] = data.get("emails", [{}])[0].get("address", "")
+            df.at[i, "Atividade Principal"] = data.get("mainActivity", {}).get("text", "")
+            df.at[i, "CNAEs Secundários"] = "; ".join([act["text"] for act in data.get("sideActivities", [])])
 
-            telefones = data.get("telefones", [])
-            if len(telefones) > 0:
-                df.at[i, "telefone_1"] = telefones[0].get("numero", "")
-            if len(telefones) > 1:
-                df.at[i, "telefone_2"] = telefones[1].get("numero", "")
-            df.at[i, "fax"] = data.get("fax", "")
+            # Endereço
+            df.at[i, "Endereço"] = address.get("street", "")
+            df.at[i, "Número"] = address.get("number", "")
+            df.at[i, "Complemento"] = address.get("details", "")
+            df.at[i, "Município"] = address.get("city", "")
+            df.at[i, "UF"] = address.get("state", "")
+            df.at[i, "CEP"] = address.get("zip", "")
+            df.at[i, "Geolocalização"] = f"{address.get('latitude','')}, {address.get('longitude','')}"
 
-            cnae_principal = data.get("cnaePrincipal", {})
-            df.at[i, "cnae_principal_codigo"] = cnae_principal.get("codigo", "")
-            df.at[i, "cnae_principal_descricao"] = cnae_principal.get("descricao", "")
+            # Simples Nacional / MEI
+            df.at[i, "Simples Optante"] = simples.get("optant", "")
+            df.at[i, "Simples Desde"] = simples.get("since", "")
+            df.at[i, "MEI Optante"] = simei.get("optant", "")
+            df.at[i, "MEI Desde"] = simei.get("since", "")
 
-            natureza = data.get("naturezaJuridica", {})
-            df.at[i, "natureza_juridica_codigo"] = natureza.get("codigo", "")
-            df.at[i, "natureza_juridica_descricao"] = natureza.get("descricao", "")
-
-            df.at[i, "situacao"] = data.get("situacao", "")
-            df.at[i, "data_situacao"] = data.get("dataSituacao", "")
-            df.at[i, "motivo_situacao"] = data.get("motivoSituacao", "")
-            df.at[i, "porte"] = data.get("porte", "")
-
-            # Simples Nacional
-            simples = data.get("simples", {})
-            df.at[i, "simples_opcao"] = simples.get("simples", "")
-            df.at[i, "simples_data_opcao"] = simples.get("dataOpcaoSimples", "")
-            df.at[i, "simples_data_exclusao"] = simples.get("dataExclusaoSimples", "")
-            df.at[i, "mei_opcao"] = simples.get("mei", "")
-            df.at[i, "mei_data_opcao"] = simples.get("dataOpcaoMei", "")
-            df.at[i, "mei_data_exclusao"] = simples.get("dataExclusaoMei", "")
-
-            # Inscrição Estadual
-            ies = data.get("inscricoesEstaduais", [])
-            df.at[i, "ie_ufs"] = ", ".join([ie.get("uf", "") for ie in ies])
-            df.at[i, "ie_numeros"] = ", ".join([ie.get("numero", "") for ie in ies])
-            df.at[i, "ie_situacoes"] = ", ".join([ie.get("situacao", "") for ie in ies])
-
-            # SUFRAMA
-            suframa = data.get("suframa", {})
-            df.at[i, "suframa_numero"] = suframa.get("numero", "")
-            df.at[i, "suframa_situacao"] = suframa.get("situacao", "")
-            df.at[i, "suframa_incentivo"] = suframa.get("incentivoFiscal", "")
-
-            # Geocodificação
-            geo = data.get("geocodificacao", {})
-            df.at[i, "latitude"] = geo.get("latitude", "")
-            df.at[i, "longitude"] = geo.get("longitude", "")
+            # Inscrições estaduais por UF
+            for reg in data.get("registrations", []):
+                if reg["state"] == "SP":
+                    df.at[i, "IE_SP"] = reg["number"]
+                elif reg["state"] == "MS":
+                    df.at[i, "IE_MS"] = reg["number"]
+                elif reg["state"] == "AM":
+                    df.at[i, "IE_AM"] = reg["number"]
 
             # Sócios
-            socios = data.get("socios", [])
-            df.at[i, "socios_nomes"] = "; ".join([s.get("nome", "") for s in socios])
+            membros = company.get("members", [])
+            nomes_socios = [m["person"]["name"] for m in membros if "person" in m]
+            df.at[i, "Sócios"] = "; ".join(nomes_socios)
 
         except Exception as e:
             print(f"Erro ao processar CNPJ {cnpj}: {e}")
 
         time.sleep(DELAY)
 
-    # Salva o Excel com os dados enriquecidos
-    Path("files").mkdir(parents=True, exist_ok=True)
-    output = Path("files") / f"{uuid.uuid4()}.xlsx"
-    df.to_excel(output, index=False)
-    return output
+    output_filename = f"{uuid.uuid4()}.xlsx"
+    output_path = Path("files") / output_filename
+    df.to_excel(output_path, index=False)
+    return output_path
