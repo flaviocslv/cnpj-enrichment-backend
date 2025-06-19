@@ -26,5 +26,9 @@ async def process_excel(uploaded_file):
 
     output_filename = f"{uuid.uuid4()}.xlsx"
     output_path = Path("files") / output_filename
+
+    # Garante que o diretório 'files' existe antes de salvar
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
     df.to_excel(output_path, index=False)
     return output_path
