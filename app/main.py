@@ -1,3 +1,4 @@
+import time
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
@@ -85,7 +86,6 @@ async def log_requests(request, call_next):
 
 if __name__ == "__main__":
     import uvicorn
-    import time
     
     uvicorn.run(
         "app.main:app",
