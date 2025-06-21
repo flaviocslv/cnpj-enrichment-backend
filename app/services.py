@@ -3,10 +3,12 @@ import requests
 import time
 import uuid
 import json
+import io
 from pathlib import Path
 from app.utils import sanitize_cnpj
 from app.config import API_URL, DELAY
 from app.tasks.registry import set_status, set_result_path
+from app.tasks.registry import update_task
 
 # Função reutilizável para processar o Excel e retornar caminho do arquivo gerado
 def enrich_excel_from_file(file_obj) -> Path:
@@ -108,15 +110,22 @@ def enrich_excel_from_file(file_obj) -> Path:
 
 # Compatível com o endpoint atual (síncrono)
 async def process_excel(uploaded_file):
-    return enrich_excel_from_file(uploaded_file.file)
+    contents = await uploaded_file.read()
+    file_like = io.BytesIO(contents)
+    return enrich_excel_from_file(file_like)
+    
 
 # Compatível com o novo fluxo assíncrono
 async def start_background_process(uploaded_file, token: str):
     try:
-        set_status(token, "processing")
-        output_path = enrich_excel_from_file(uploaded_file.file)
-        set_result_path(token, output_path.name)
-        set_status(token, "completed")
+        # Lê os bytes do arquivo enquanto ele ainda está disponível
+        contents = await uploaded_file.read()
+        file_like = io.BytesIO(contents)
+
+        # Passa o stream para a função de enriquecimento
+        output_path = enrich_excel_from_file(file_like)
+
+        update_task(token, status="completed", file=output_path.name)
     except Exception as e:
-        set_status(token, "failed")
-        raise e
+        print("Erro:", str(e))  # opcional para log
+        update_task(token, status="failed", error=str(e))
