@@ -3,10 +3,20 @@ services:
     name: cnpj-enrichment-api
     env: python
     plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: PYTHONPATH=. uvicorn app.main:app --host 0.0.0.0 --port 10000
+    buildCommand: |
+      pip install --upgrade pip setuptools wheel &&
+      pip install --no-cache-dir -r requirements.txt
+    startCommand: PYTHONPATH=. uvicorn app.main:app --host 0.0.0.0 --port $PORT
     envVars:
-      - key: PORT
-        value: 10000
       - key: PYTHON_VERSION
         value: 3.11.9
+      - key: ENVIRONMENT
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
+      - key: MAX_FILE_SIZE_MB
+        value: 5
+      - key: MAX_CNPJS_SYNC
+        value: 20
+      - key: API_DELAY
+        value: 3.0
