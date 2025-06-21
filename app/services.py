@@ -4,123 +4,271 @@ import time
 import uuid
 import json
 import io
+import asyncio
 from pathlib import Path
+from typing import Optional, Dict, Any
 from app.utils import sanitize_cnpj
 from app.config import API_URL, DELAY
-from app.tasks.registry import set_status, set_result_path, update_task
+from app.tasks.registry import update_task
+import logging
 
-# Função reutilizável para processar o Excel e retornar caminho do arquivo gerado
-def enrich_excel_from_file(file_obj) -> Path:
-    df = pd.read_excel(file_obj)
-    df["CNPJ_Sanitizado"] = df["CNPJ"].apply(sanitize_cnpj)
+# Configurar logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-    # Colunas fixas
-    base_cols = [
-        "RazaoSocial", "Status", "DataStatus", "NaturezaJuridica", "Porte",
-        "CapitalSocial", "Telefone", "Email", "AtividadePrincipal",
-        "CNAEs", "Endereco", "Municipio", "UF", "CEP", "Numero", "Complemento",
-        "SimplesOptante", "SimplesSince", "MEIOptante", "MEISince",
-        "Latitude", "Longitude", "InscricoesEstaduais"
-    ]
-    for col in base_cols:
-        df[col] = ""
-
-    # Dinâmico
-    max_socios = 5
-    max_estabs = 5
-
-    for i in range(1, max_socios+1):
-        df[f"Socio_{i}_Nome"] = ""
-        df[f"Socio_{i}_Tipo"] = ""
-        df[f"Socio_{i}_TaxId"] = ""
-        df[f"Socio_{i}_Role"] = ""
-
-    for i in range(1, max_estabs+1):
-        df[f"Estab_{i}_CNPJ"] = ""
-        df[f"Estab_{i}_Tipo"] = ""
-        df[f"Estab_{i}_Endereco"] = ""
-        df[f"Estab_{i}_UF"] = ""
-
-    for idx, row in df.iterrows():
-        cnpj = row["CNPJ_Sanitizado"]
+class CNPJEnricher:
+    def __init__(self, api_url: str = API_URL, delay: float = DELAY):
+        self.api_url = api_url
+        self.delay = delay
+        self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': 'CNPJ-Enrichment-Tool/1.0',
+            'Accept': 'application/json'
+        })
+        
+    def fetch_cnpj_data(self, cnpj: str) -> Optional[Dict[Any, Any]]:
+        """Busca dados de um CNPJ com tratamento robusto de erros"""
         try:
-            resp = requests.get(f"{API_URL}/{cnpj}?simples=true&registrations=BR&suframa=true&geocoding=true")
-            if resp.status_code != 200:
+            url = f"{self.api_url}/{cnpj}?simples=true&registrations=BR&suframa=true&geocoding=true"
+            
+            # Retry com backoff exponencial
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    response = self.session.get(url, timeout=30)
+                    
+                    if response.status_code == 200:
+                        return response.json()
+                    elif response.status_code == 429:  # Rate limit
+                        wait_time = self.delay * (2 ** attempt)
+                        logger.warning(f"Rate limit atingido. Aguardando {wait_time}s...")
+                        time.sleep(wait_time)
+                        continue
+                    elif response.status_code == 404:
+                        logger.info(f"CNPJ {cnpj} não encontrado")
+                        return None
+                    else:
+                        logger.warning(f"Status {response.status_code} para CNPJ {cnpj}")
+                        return None
+                        
+                except requests.exceptions.RequestException as e:
+                    if attempt == max_retries - 1:
+                        logger.error(f"Erro na requisição para CNPJ {cnpj}: {e}")
+                        return None
+                    time.sleep(self.delay * (attempt + 1))
+                    
+        except Exception as e:
+            logger.error(f"Erro inesperado ao buscar CNPJ {cnpj}: {e}")
+            return None
+            
+        return None
+
+    def extract_data_from_response(self, data: Dict[Any, Any]) -> Dict[str, Any]:
+        """Extrai e organiza dados da resposta da API"""
+        if not data:
+            return {}
+            
+        comp = data.get("company", {})
+        addr = data.get("address", {})
+        
+        # Dados básicos
+        extracted = {
+            "RazaoSocial": comp.get("name", ""),
+            "Status": data.get("status", {}).get("text", ""),
+            "DataStatus": data.get("statusDate", ""),
+            "NaturezaJuridica": comp.get("nature", {}).get("text", ""),
+            "Porte": comp.get("size", {}).get("text", ""),
+            "CapitalSocial": comp.get("equity", ""),
+            "AtividadePrincipal": data.get("mainActivity", {}).get("text", ""),
+            "CNAEs": "; ".join([a.get("text", "") for a in data.get("sideActivities", [])]),
+            
+            # Contato
+            "Telefone": "",
+            "Email": "",
+            
+            # Endereço
+            "Endereco": addr.get("street", ""),
+            "Municipio": addr.get("city", ""),
+            "UF": addr.get("state", ""),
+            "CEP": addr.get("zip", ""),
+            "Numero": addr.get("number", ""),
+            "Complemento": addr.get("details", ""),
+            "Latitude": addr.get("latitude", ""),
+            "Longitude": addr.get("longitude", ""),
+            
+            # Simples/MEI
+            "SimplesOptante": "",
+            "SimplesSince": "",
+            "MEIOptante": "",
+            "MEISince": "",
+            
+            # Inscrições estaduais
+            "InscricoesEstaduais": ""
+        }
+        
+        # Contatos
+        phones = data.get("phones", [])
+        if phones:
+            extracted["Telefone"] = phones[0].get("number", "")
+            
+        emails = data.get("emails", [])
+        if emails:
+            extracted["Email"] = emails[0].get("address", "")
+        
+        # Simples Nacional
+        simples = comp.get("simples", {})
+        extracted["SimplesOptante"] = "Sim" if simples.get("optant") else "Não"
+        extracted["SimplesSince"] = simples.get("since", "")
+        
+        # MEI
+        simei = comp.get("simei", {})
+        extracted["MEIOptante"] = "Sim" if simei.get("optant") else "Não"
+        extracted["MEISince"] = simei.get("since", "")
+        
+        # Inscrições estaduais
+        ies_dict = {
+            reg.get("state"): reg.get("number")
+            for reg in data.get("registrations", [])
+            if reg.get("state") and reg.get("number")
+        }
+        extracted["InscricoesEstaduais"] = json.dumps(ies_dict, ensure_ascii=False)
+        
+        # Sócios (até 5)
+        for i, member in enumerate(comp.get("members", [])[:5]):
+            extracted[f"Socio_{i+1}_Nome"] = member.get("person", {}).get("name", "")
+            extracted[f"Socio_{i+1}_Tipo"] = member.get("person", {}).get("type", "")
+            extracted[f"Socio_{i+1}_TaxId"] = member.get("person", {}).get("taxId", "")
+            extracted[f"Socio_{i+1}_Role"] = member.get("role", {}).get("text", "")
+        
+        # Estabelecimentos (até 5)
+        for i, estab in enumerate(data.get("establishments", [])[:5]):
+            extracted[f"Estab_{i+1}_CNPJ"] = estab.get("cnpj", "")
+            extracted[f"Estab_{i+1}_Tipo"] = estab.get("tipo", "")
+            extracted[f"Estab_{i+1}_Endereco"] = estab.get("logradouro", "")
+            extracted[f"Estab_{i+1}_UF"] = estab.get("estado", "")
+            
+        return extracted
+
+    def setup_dataframe_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Prepara o DataFrame com todas as colunas necessárias"""
+        df = df.copy()
+        df["CNPJ_Sanitizado"] = df["CNPJ"].apply(sanitize_cnpj)
+        
+        # Colunas básicas
+        base_cols = [
+            "RazaoSocial", "Status", "DataStatus", "NaturezaJuridica", "Porte",
+            "CapitalSocial", "Telefone", "Email", "AtividadePrincipal",
+            "CNAEs", "Endereco", "Municipio", "UF", "CEP", "Numero", "Complemento",
+            "SimplesOptante", "SimplesSince", "MEIOptante", "MEISince",
+            "Latitude", "Longitude", "InscricoesEstaduais"
+        ]
+        
+        for col in base_cols:
+            if col not in df.columns:
+                df[col] = ""
+        
+        # Colunas dinâmicas para sócios e estabelecimentos
+        for i in range(1, 6):  # 5 sócios máximo
+            for suffix in ["Nome", "Tipo", "TaxId", "Role"]:
+                col_name = f"Socio_{i}_{suffix}"
+                if col_name not in df.columns:
+                    df[col_name] = ""
+        
+        for i in range(1, 6):  # 5 estabelecimentos máximo
+            for suffix in ["CNPJ", "Tipo", "Endereco", "UF"]:
+                col_name = f"Estab_{i}_{suffix}"
+                if col_name not in df.columns:
+                    df[col_name] = ""
+        
+        return df
+
+    def enrich_dataframe(self, df: pd.DataFrame, token: str = None) -> pd.DataFrame:
+        """Enriquece o DataFrame com dados dos CNPJs"""
+        df = self.setup_dataframe_columns(df)
+        total_rows = len(df)
+        
+        logger.info(f"Iniciando enriquecimento de {total_rows} CNPJs")
+        
+        for idx, row in df.iterrows():
+            try:
+                cnpj = row["CNPJ_Sanitizado"]
+                
+                # Validação básica do CNPJ
+                if not cnpj or len(cnpj) != 14:
+                    logger.warning(f"CNPJ inválido na linha {idx + 1}: {cnpj}")
+                    continue
+                
+                # Atualizar progresso se token fornecido
+                if token:
+                    progress = int((idx / total_rows) * 100)
+                    update_task(token, progress=progress)
+                
+                # Buscar dados
+                data = self.fetch_cnpj_data(cnpj)
+                if data:
+                    extracted_data = self.extract_data_from_response(data)
+                    
+                    # Atualizar DataFrame
+                    for key, value in extracted_data.items():
+                        if key in df.columns:
+                            df.at[idx, key] = value
+                
+                # Respeitar rate limit
+                time.sleep(self.delay)
+                
+            except Exception as e:
+                logger.error(f"Erro ao processar linha {idx + 1}: {e}")
                 continue
-            data = resp.json()
-            comp = data.get("company", {})
-            addr = data.get("address", {})
+        
+        logger.info("Enriquecimento concluído")
+        return df
 
-            df.at[idx, "RazaoSocial"] = comp.get("name", "")
-            df.at[idx, "Status"] = data.get("status", {}).get("text", "")
-            df.at[idx, "DataStatus"] = data.get("statusDate", "")
-            df.at[idx, "NaturezaJuridica"] = comp.get("nature", {}).get("text", "")
-            df.at[idx, "Porte"] = comp.get("size", {}).get("text", "")
-            df.at[idx, "CapitalSocial"] = comp.get("equity", "")
-            phones = data.get("phones", [])
-            df.at[idx, "Telefone"] = phones[0].get("number", "") if phones else ""
-            emails = data.get("emails", [])
-            df.at[idx, "Email"] = emails[0].get("address", "") if emails else ""
-            df.at[idx, "AtividadePrincipal"] = data.get("mainActivity", {}).get("text", "")
-            df.at[idx, "CNAEs"] = "; ".join([a.get("text", "") for a in data.get("sideActivities", [])])
-            df.at[idx, "Endereco"] = addr.get("street", "")
-            df.at[idx, "Municipio"] = addr.get("city", "")
-            df.at[idx, "UF"] = addr.get("state", "")
-            df.at[idx, "CEP"] = addr.get("zip", "")
-            df.at[idx, "Numero"] = addr.get("number", "")
-            df.at[idx, "Complemento"] = addr.get("details", "")
-            df.at[idx, "Latitude"] = addr.get("latitude", "")
-            df.at[idx, "Longitude"] = addr.get("longitude", "")
+def enrich_excel_from_file(file_obj, token: str = None) -> Path:
+    """Função principal para enriquecer Excel"""
+    try:
+        # Ler Excel
+        df = pd.read_excel(file_obj)
+        
+        # Validar se existe coluna CNPJ
+        if "CNPJ" not in df.columns:
+            raise ValueError("Coluna 'CNPJ' não encontrada na planilha")
+        
+        # Enriquecer dados
+        enricher = CNPJEnricher()
+        df_enriched = enricher.enrich_dataframe(df, token)
+        
+        # Salvar arquivo
+        Path("files").mkdir(parents=True, exist_ok=True)
+        output_path = Path("files") / f"{uuid.uuid4()}.xlsx"
+        
+        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+            df_enriched.to_excel(writer, index=False, sheet_name='Dados_Enriquecidos')
+        
+        logger.info(f"Arquivo salvo: {output_path}")
+        return output_path
+        
+    except Exception as e:
+        logger.error(f"Erro no processamento do arquivo: {e}")
+        raise
 
-            simples = comp.get("simples", {})
-            df.at[idx, "SimplesOptante"] = "Sim" if simples.get("optant") else "Não"
-            df.at[idx, "SimplesSince"] = simples.get("since", "")
-            simei = comp.get("simei", {})
-            df.at[idx, "MEIOptante"] = "Sim" if simei.get("optant") else "Não"
-            df.at[idx, "MEISince"] = simei.get("since", "")
-
-            ies_dict = {
-                reg.get("state"): reg.get("number")
-                for reg in data.get("registrations", [])
-                if reg.get("state") and reg.get("number")
-            }
-            df.at[idx, "InscricoesEstaduais"] = json.dumps(ies_dict, ensure_ascii=False)
-
-            for i, m in enumerate(comp.get("members", [])[:max_socios]):
-                df.at[idx, f"Socio_{i+1}_Nome"] = m.get("person", {}).get("name", "")
-                df.at[idx, f"Socio_{i+1}_Tipo"] = m.get("person", {}).get("type", "")
-                df.at[idx, f"Socio_{i+1}_TaxId"] = m.get("person", {}).get("taxId", "")
-                df.at[idx, f"Socio_{i+1}_Role"] = m.get("role", {}).get("text", "")
-
-            for i, est in enumerate(data.get("establishments", [])[:max_estabs]):
-                df.at[idx, f"Estab_{i+1}_CNPJ"] = est.get("cnpj", "")
-                df.at[idx, f"Estab_{i+1}_Tipo"] = est.get("tipo", "")
-                df.at[idx, f"Estab_{i+1}_Endereco"] = est.get("logradouro", "")
-                df.at[idx, f"Estab_{i+1}_UF"] = est.get("estado", "")
-
-            time.sleep(DELAY)
-        except Exception:
-            continue  # ignora falhas individuais
-
-    Path("files").mkdir(parents=True, exist_ok=True)
-    out = Path("files") / f"{uuid.uuid4()}.xlsx"
-    df.to_excel(out, index=False)
-    return out
-
-# Função compartilhada para ambos os fluxos
-async def handle_upload(uploaded_file):
+# Funções de compatibilidade com a API atual
+async def handle_upload(uploaded_file, token: str = None):
+    """Processa upload de arquivo"""
     contents = await uploaded_file.read()
-    return enrich_excel_from_file(io.BytesIO(contents))
+    return enrich_excel_from_file(io.BytesIO(contents), token)
 
-# Compatível com o endpoint atual (síncrono)
 async def process_excel(uploaded_file):
+    """Processamento síncrono (compatibilidade)"""
     return await handle_upload(uploaded_file)
 
-# Compatível com o novo fluxo assíncrono
 async def start_background_process(uploaded_file, token: str):
+    """Processamento assíncrono em background"""
     try:
-        output_path = await handle_upload(uploaded_file)
-        update_task(token, status="completed", file=output_path.name)
+        update_task(token, status="processing", progress=0)
+        output_path = await handle_upload(uploaded_file, token)
+        update_task(token, status="completed", progress=100, file=output_path.name)
+        logger.info(f"Processamento concluído para token {token}")
     except Exception as e:
-        print("Erro:", str(e))
-        update_task(token, status="failed", error=str(e))
+        error_msg = str(e)
+        logger.error(f"Erro no processamento background: {error_msg}")
+        update_task(token, status="failed", error=error_msg)
