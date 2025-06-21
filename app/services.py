@@ -319,9 +319,10 @@ async def process_excel_sync(uploaded_file: UploadFile) -> Path:
         logger.error(f"Erro no processamento síncrono: {e}")
         raise
 
-async def start_background_process(uploaded_file: UploadFile, token: str):
+async def start_background_process(file_content: bytes, file_name: str, token: str):
     """
     Processamento assíncrono em background
+    CORREÇÃO: Recebe o conteúdo já lido em vez de UploadFile
     """
     try:
         logger.info(f"Iniciando processamento assíncrono para token: {token}")
@@ -329,11 +330,8 @@ async def start_background_process(uploaded_file: UploadFile, token: str):
         # Atualizar status inicial
         update_task(token, status="processing", progress=0)
         
-        # Ler conteúdo do arquivo
-        contents = await uploaded_file.read()
-        
-        # Ler e validar Excel
-        df = read_excel_file(contents)
+        # Ler e validar Excel usando o conteúdo já lido
+        df = read_excel_file(file_content)
         
         # Enriquecer dados com atualização de progresso
         enricher = CNPJEnricher()
