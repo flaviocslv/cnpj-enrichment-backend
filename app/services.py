@@ -7,8 +7,7 @@ import io
 from pathlib import Path
 from app.utils import sanitize_cnpj
 from app.config import API_URL, DELAY
-from app.tasks.registry import set_status, set_result_path
-from app.tasks.registry import update_task
+from app.tasks.registry import set_status, set_result_path, update_task
 
 # Função reutilizável para processar o Excel e retornar caminho do arquivo gerado
 def enrich_excel_from_file(file_obj) -> Path:
@@ -63,7 +62,7 @@ def enrich_excel_from_file(file_obj) -> Path:
             emails = data.get("emails", [])
             df.at[idx, "Email"] = emails[0].get("address", "") if emails else ""
             df.at[idx, "AtividadePrincipal"] = data.get("mainActivity", {}).get("text", "")
-            df.at[idx, "CNAEs"] = "; ".join([a.get("text","") for a in data.get("sideActivities", [])])
+            df.at[idx, "CNAEs"] = "; ".join([a.get("text", "") for a in data.get("sideActivities", [])])
             df.at[idx, "Endereco"] = addr.get("street", "")
             df.at[idx, "Municipio"] = addr.get("city", "")
             df.at[idx, "UF"] = addr.get("state", "")
@@ -100,7 +99,7 @@ def enrich_excel_from_file(file_obj) -> Path:
                 df.at[idx, f"Estab_{i+1}_UF"] = est.get("estado", "")
 
             time.sleep(DELAY)
-        except Exception as e:
+        except Exception:
             continue  # ignora falhas individuais
 
     Path("files").mkdir(parents=True, exist_ok=True)
@@ -108,24 +107,20 @@ def enrich_excel_from_file(file_obj) -> Path:
     df.to_excel(out, index=False)
     return out
 
+# Função compartilhada para ambos os fluxos
+async def handle_upload(uploaded_file):
+    contents = await uploaded_file.read()
+    return enrich_excel_from_file(io.BytesIO(contents))
+
 # Compatível com o endpoint atual (síncrono)
 async def process_excel(uploaded_file):
-    contents = await uploaded_file.read()
-    file_like = io.BytesIO(contents)
-    return enrich_excel_from_file(file_like)
-    
+    return await handle_upload(uploaded_file)
 
 # Compatível com o novo fluxo assíncrono
 async def start_background_process(uploaded_file, token: str):
     try:
-        # Lê os bytes do arquivo enquanto ele ainda está disponível
-        contents = await uploaded_file.read()
-        file_like = io.BytesIO(contents)
-
-        # Passa o stream para a função de enriquecimento
-        output_path = enrich_excel_from_file(file_like)
-
+        output_path = await handle_upload(uploaded_file)
         update_task(token, status="completed", file=output_path.name)
     except Exception as e:
-        print("Erro:", str(e))  # opcional para log
+        print("Erro:", str(e))
         update_task(token, status="failed", error=str(e))
