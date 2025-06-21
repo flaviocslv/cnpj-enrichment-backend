@@ -78,11 +78,15 @@ async def start_async_process(file: UploadFile = File(...), background_tasks: Ba
         raise HTTPException(status_code=400, detail="Formato de arquivo inválido. Use .xlsx ou .xls")
     
     try:
+        # CORREÇÃO: Ler o arquivo ANTES de adicionar à tarefa background
+        file_content = await file.read()
+        file_name = file.filename
+        
         # Criar entrada de tarefa
         token = create_task_entry()
         
-        # Adicionar tarefa em background
-        background_tasks.add_task(start_background_process, file, token)
+        # Adicionar tarefa em background passando o conteúdo já lido
+        background_tasks.add_task(start_background_process, file_content, file_name, token)
         
         return {
             "status": "started",
