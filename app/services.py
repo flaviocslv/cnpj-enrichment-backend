@@ -200,10 +200,10 @@ class CNPJEnricher:
 
 def read_excel_file(file_content: bytes) -> pd.DataFrame:
     try:
-        df = pd.read_excel(io.BytesIO(file_content), engine='openpyxl')
+        df = pd.read_excel(io.BytesIO(file_content), engine='openpyxl', dtype={'CNPJ': str})
     except Exception:
         try:
-            df = pd.read_excel(io.BytesIO(file_content), engine='xlrd')
+            df = pd.read_excel(io.BytesIO(file_content), engine='xlrd', dtype={'CNPJ': str})
         except Exception as e:
             raise ValueError(f"Erro ao ler arquivo Excel: {str(e)}")
     if "CNPJ" not in df.columns:
